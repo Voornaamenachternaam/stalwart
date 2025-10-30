@@ -409,13 +409,6 @@ jobs:
             archive/**/*.tar.gz
             archive/**/*.zip
 
-      - name: Use cosign to sign existing artifacts
-        uses: sigstore/gh-action-sigstore-python@v3.0.1
-        with:
-          inputs: |
-            archive/**/*.tar.gz
-            archive/**/*.zip
-
       - name: Release
         uses: softprops/action-gh-release@v2.4.1
         with:
