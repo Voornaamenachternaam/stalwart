@@ -16,7 +16,7 @@ on:
 
 env:
   # Must be a lowercase value like "myuser/myrepo". We force lowercase below.
-  DOCKERHUB_REPO: ${{ toLower(secrets.DOCKERHUB_REPO) }}
+  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO) }}
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   SCCACHE_GHA_ENABLED: true
   RUSTC_WRAPPER: sccache
