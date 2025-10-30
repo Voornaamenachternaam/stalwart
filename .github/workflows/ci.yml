@@ -1,4 +1,4 @@
-name: "CI"
+name: CI
 
 on:
   workflow_dispatch:
@@ -12,9 +12,12 @@ on:
         default: false
         type: boolean
   push:
-     tags: ["v*.*.*"]
+    tags: ["v*.*.*"]
 
 env:
+  # Must be a lowercase value like "myuser/myrepo". We force lowercase below.
+  DOCKERHUB_REPO: ${{ toLower(secrets.DOCKERHUB_REPO) }}
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   SCCACHE_GHA_ENABLED: true
   RUSTC_WRAPPER: sccache
   CARGO_TERM_COLOR: always
@@ -31,7 +34,7 @@ jobs:
         include:
           - variant: gnu
           - variant: musl
-    name: Merge image / ${{matrix.variant}}
+    name: Merge image / ${{ matrix.variant }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -42,36 +45,47 @@ jobs:
     if: github.event_name == 'push' || inputs.Docker
     steps:
       - name: Log In to DockerHub
-        uses: docker/login-action@v3.6.0.6.0
+        uses: docker/login-action@v3
         with:
-          username: ${{secrets.DOCKERHUB_USERNAME}}
-          password: ${{secrets.DOCKERHUB_TOKEN}}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Download ${{matrix.variant}} meta bake definition
-        uses: actions/download-artifact@v6.0.0
+      - name: Download ${{ matrix.variant }} meta bake definition
+        uses: actions/download-artifact@v6
         with:
-          name: bake-meta-${{matrix.variant}}
-          path: ${{ runner.temp }}/${{matrix.variant}}
+          name: bake-meta-${{ matrix.variant }}
+          path: ${{ runner.temp }}/${{ matrix.variant }}
 
-      - name: Download ${{matrix.variant}} digests
-        uses: actions/download-artifact@v6.0.0
+      - name: Download ${{ matrix.variant }} digests
+        uses: actions/download-artifact@v6
         with:
-          path: ${{ runner.temp }}/${{matrix.variant}}/digests
-          pattern: digests-${{matrix.variant}}-*
+          path: ${{ runner.temp }}/${{ matrix.variant }}/digests
+          pattern: digests-${{ matrix.variant }}-*
           merge-multiple: true
 
-      - name: Create ${{matrix.variant}} manifest list and push
-        working-directory: ${{ runner.temp }}/${{matrix.variant}}/digests
+      - name: Create ${{ matrix.variant }} manifest list and push
+        working-directory: ${{ runner.temp }}/${{ matrix.variant }}/digests
         run: |
-          docker buildx imagetools create $(jq -cr '.target."docker-metadata-action".tags | map(select(startswith("index.docker.io/oiutfguiahsiugdsfiuhgdiopfso")) | "-t " + .) | join(" ")' ${{ runner.temp }}/${{matrix.variant}}/bake-meta.json) \
-            $(printf 'index.docker.io/oiutfguiahsiugdsfiuhgdiopfso@sha256:%s ' *)
+          set -euo pipefail
+          DOCKER_IMAGE_PREFIX="index.docker.io/${{ env.DOCKERHUB_REPO }}"
+          # collect tags that correspond to our dockerhub image prefix
+          TAGS=$(jq -r '.target."docker-metadata-action".tags[] | select(startswith("'"$DOCKER_IMAGE_PREFIX"'"))' ${{ runner.temp }}/${{ matrix.variant }}/bake-meta.json | sed -e 's/^/-t /' | xargs || true)
+          if [ -z "$TAGS" ]; then
+            echo "No Docker Hub tags found in bake-meta.json for prefix: $DOCKER_IMAGE_PREFIX"
+            exit 1
+          fi
+          # all digest files in this dir (*) correspond to uploaded images (from linux build). Create manifest with those digests.
+          docker buildx imagetools create $TAGS $(printf "${DOCKER_IMAGE_PREFIX}@sha256:%s " *)
 
-      - name: Inspect ${{matrix.variant}} image
+      - name: Inspect ${{ matrix.variant }} image
         id: manifest-digest
         run: |
-          docker buildx imagetools inspect --format '{{json .Manifest}}' index.docker.io/oiutfguiahsiugdsfiuhgdiopfso:$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' ${{ runner.temp }}/${{matrix.variant}}/bake-meta.json) | jq -r '.digest' > DOCKERHUB_DIGEST_SHA
+          set -euo pipefail
+          DOCKER_IMAGE_PREFIX="index.docker.io/${{ env.DOCKERHUB_REPO }}"
+          VERSION_TAG=$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' ${{ runner.temp }}/${{ matrix.variant }}/bake-meta.json)
+          docker buildx imagetools inspect --format '{{json .Manifest}}' "${DOCKER_IMAGE_PREFIX}:${VERSION_TAG}" | jq -r '.digest' > DOCKERHUB_DIGEST_SHA
           echo "DOCKERHUB_DIGEST_SHA=$(cat DOCKERHUB_DIGEST_SHA)" | tee -a "${GITHUB_ENV}"
-          
+
   linux:
     permissions:
       id-token: write
@@ -98,20 +112,19 @@ jobs:
             platform: linux/arm64
             suffix: '-alpine'
             build_env: 'JEMALLOC_SYS_WITH_LG_PAGE=16 '
-
-    name: Build / ${{matrix.target}}
+    name: Build / ${{ matrix.target }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3.6.0
+        uses: docker/setup-qemu-action@v2
         with:
           platforms: "arm64"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.11.1
+        uses: docker/setup-buildx-action@v3
         with:
           buildkitd-config-inline: |
             [registry."docker.io"]
@@ -119,10 +132,10 @@ jobs:
             network=host
 
       - name: Log In to DockerHub
-        uses: docker/login-action@v3.6.0
+        uses: docker/login-action@v3
         with:
-          username: ${{secrets.DOCKERHUB_USERNAME}}
-          password: ${{secrets.DOCKERHUB_TOKEN}}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Calculate shasum of external deps
         id: cal-dep-shasum
@@ -130,7 +143,7 @@ jobs:
           echo "checksum=$(yq -p toml -oy '.package[] | select((.source | contains("")) or (.checksum | contains("")))' Cargo.lock | sha256sum | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Cache apt
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v4
         id: apt-cache
         with:
           path: |
@@ -139,7 +152,7 @@ jobs:
           key: apt-cache-${{ hashFiles('Dockerfile.build') }}
 
       - name: Cache Cargo
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v4
         id: cargo-cache
         with:
           path: |
@@ -148,7 +161,7 @@ jobs:
           key: cargo-cache-${{ steps.cal-dep-shasum.outputs.checksum }}
 
       - name: Inject cache into docker
-        uses: reproducible-containers/buildkit-cache-dance@v3.3.0
+        uses: reproducible-containers/buildkit-cache-dance@v3
         with:
           cache-map: |
             {
@@ -160,13 +173,13 @@ jobs:
           skip-extraction: ${{ steps.cargo-cache.outputs.cache-hit }} && ${{ steps.apt-cache.outputs.cache-hit }}
 
       - name: Extract Metadata for Docker
-        uses: docker/metadata-action@v5.8.0
+        uses: docker/metadata-action@v5
         id: meta
         with:
           images: |
-            index.docker.io/oiutfguiahsiugdsfiuhgdiopfso
+            index.docker.io/${{ env.DOCKERHUB_REPO }}
           flavor: |
-            suffix=${{matrix.suffix}},onlatest=true
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=ref,event=tag
             type=ref,event=branch,prefix=branch-
@@ -175,27 +188,27 @@ jobs:
 
       - name: Build Artifact
         id: bake
-        uses: docker/bake-action@v6.9.0
+        uses: docker/bake-action@v6
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false
-          TARGET: ${{matrix.target}}
-          BUILD_ENV: ${{matrix.build_env}}
-          DOCKER_PLATFORM: ${{matrix.platform}}
-          SUFFIX: ${{matrix.suffix}}
+          TARGET: ${{ matrix.target }}
+          BUILD_ENV: ${{ matrix.build_env }}
+          DOCKER_PLATFORM: ${{ matrix.platform }}
+          SUFFIX: ${{ matrix.suffix }}
         with:
           source: .
           set: |
             *.tags=
-            image.output=type=image,"name=index.docker.io/oiutfguiahsiugdsfiuhgdiopfso",push-by-digest=true,name-canonical=true,push=true,compression=zstd,compression-level=9,force-compression=true,oci-mediatypes=true
+            image.output=type=image,"name=index.docker.io/${{ env.DOCKERHUB_REPO }}",push-by-digest=true,name-canonical=true,push=true,compression=zstd,compression-level=9,force-compression=true,oci-mediatypes=true
           files: |
             docker-bake.hcl
             ${{ steps.meta.outputs.bake-file }}
-          targets: ${{(github.event_name == 'push' || inputs.Docker) && 'build,image' || 'build'}}
+          targets: ${{ (github.event_name == 'push' || inputs.Docker) && 'build,image' || 'build' }}
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         with:
-          name: artifact-${{matrix.target}}
+          name: artifact-${{ matrix.target }}
           path: |
             artifact
             !artifact/*.json
@@ -210,15 +223,15 @@ jobs:
 
       - name: Upload digest
         if: github.event_name == 'push' || inputs.Docker
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         with:
-          name: digests-${{matrix.suffix == '' && 'gnu' || 'musl'}}-${{ matrix.target }}
+          name: digests-${{ matrix.suffix == '' && 'gnu' || 'musl'}}-${{ matrix.target }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
       - name: Upload GNU meta bake definition
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         if: (github.event_name == 'push' || inputs.Docker) && endsWith(matrix.target,'gnu') && startsWith(matrix.target,'x86')
         with:
           name: bake-meta-gnu
@@ -227,7 +240,7 @@ jobs:
           retention-days: 1
 
       - name: Upload musl meta bake definition
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         if: (github.event_name == 'push' || inputs.Docker) && endsWith(matrix.target,'musl') && startsWith(matrix.target,'x86')
         with:
           name: bake-meta-musl
@@ -236,18 +249,16 @@ jobs:
           retention-days: 1
 
   windows:
-    name: Build / ${{matrix.target}}
+    name: Build / ${{ matrix.target }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-        #   - target: aarch64-pc-windows-msvc
           - target: x86_64-pc-windows-msvc
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
 
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -256,21 +267,21 @@ jobs:
 
       - name: Build
         run: |
-          rustup target add ${{matrix.target}}
-          cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features "sqlite postgres mysql rocks elastic s3 redis azure nats enterprise"
-          cargo build --release --target ${{matrix.target}} -p stalwart-cli
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p stalwart --no-default-features --features "sqlite postgres mysql rocks elastic s3 redis azure nats enterprise"
+          cargo build --release --target ${{ matrix.target }} -p stalwart-cli
           mkdir -p artifacts
-          mv ./target/${{matrix.target}}/release/stalwart.exe ./artifacts/stalwart.exe
-          mv ./target/${{matrix.target}}/release/stalwart-cli.exe ./artifacts/stalwart-cli.exe
+          mv ./target/${{ matrix.target }}/release/stalwart.exe ./artifacts/stalwart.exe
+          mv ./target/${{ matrix.target }}/release/stalwart-cli.exe ./artifacts/stalwart-cli.exe
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         with:
-          name: artifact-${{matrix.target}}
+          name: artifact-${{ matrix.target }}
           path: artifacts
 
   macos:
-    name: Build / ${{matrix.target}}
+    name: Build / ${{ matrix.target }}
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -280,7 +291,7 @@ jobs:
           - target: x86_64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
 
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -291,27 +302,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          rustup target add ${{matrix.target}}
+          rustup target add ${{ matrix.target }}
           # Get latest FoundationDB installer
-          curl --retry 5 -Lso foundationdb.pkg "$(gh api -X GET /repos/apple/foundationdb/releases --jq '.[] | select(.prerelease == false) | .assets[] | select(.name | test("${{startsWith(matrix.target, 'x86') && 'x86_64' || 'arm64'}}" + ".pkg$")) | .browser_download_url' | head -n1)"
+          curl --retry 5 -Lso foundationdb.pkg "$(gh api -X GET /repos/apple/foundationdb/releases --jq '.[] | select(.prerelease == false) | .assets[] | select(.name | test("'"${{ startsWith(matrix.target, 'x86') && 'x86_64' || 'arm64' }}"'".pkg$")) | .browser_download_url' | head -n1)"
           sudo installer -allowUntrusted -dumplog -pkg foundationdb.pkg -target /
-          cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features "foundationdb elastic s3 redis nats enterprise"
+          cargo build --release --target ${{ matrix.target }} -p stalwart --no-default-features --features "foundationdb elastic s3 redis nats enterprise"
           mkdir -p artifacts
-          mv ./target/${{matrix.target}}/release/stalwart ./artifacts/stalwart-foundationdb
+          mv ./target/${{ matrix.target }}/release/stalwart ./artifacts/stalwart-foundationdb
 
       - name: Build
         run: |
-          rustup target add ${{matrix.target}}
-          cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features "sqlite postgres mysql rocks elastic s3 redis azure nats enterprise"
-          cargo build --release --target ${{matrix.target}} -p stalwart-cli
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p stalwart --no-default-features --features "sqlite postgres mysql rocks elastic s3 redis azure nats enterprise"
+          cargo build --release --target ${{ matrix.target }} -p stalwart-cli
           mkdir -p artifacts
-          mv ./target/${{matrix.target}}/release/stalwart ./artifacts/stalwart
-          mv ./target/${{matrix.target}}/release/stalwart-cli ./artifacts/stalwart-cli
+          mv ./target/${{ matrix.target }}/release/stalwart ./artifacts/stalwart
+          mv ./target/${{ matrix.target }}/release/stalwart-cli ./artifacts/stalwart-cli
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         with:
-          name: artifact-${{matrix.target}}
+          name: artifact-${{ matrix.target }}
           path: artifacts
 
   release:
@@ -325,7 +336,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v6.0.0
+        uses: actions/download-artifact@v6
         with:
           path: archive
           pattern: artifact-*
@@ -338,7 +349,6 @@ jobs:
               local dir="$1"
               local archive_dir_name="${dir#artifact-}"
               cd "$dir"
-              # Process each file in the directory
               for file in `ls`; do
                   filename="${file%.*}"
                   extension="${file##*.}"
@@ -365,11 +375,11 @@ jobs:
             archive/**/*.zip
 
       - name: Release
-        uses: softprops/action-gh-release@v2.4.1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             archive/**/*.tar.gz
             archive/**/*.zip
-          prerelease: ${{!startsWith(github.ref, 'refs/tags/') || null}}
-          tag_name: ${{!startsWith(github.ref, 'refs/tags/') && 'nightly' || null}}
-
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') || null }}
+          tag_name: ${{ !startsWith(github.ref, 'refs/tags/') && 'nightly' || null }}
+ 
